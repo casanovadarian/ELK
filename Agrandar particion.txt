@@ -1,0 +1,7 @@
+Agrandar particion:
+
+lsblk							para identificar disco y particion
+
+sudo growpart /dev/sda 2				/dev/sda: Es el nombre del disco (sin el número de partición).
+							2: Es el número de partición que quieres expandir (en el ejemplo, sda2).
+sudo resize2fs /dev/sda2
