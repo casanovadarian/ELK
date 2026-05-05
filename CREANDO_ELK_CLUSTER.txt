@@ -1,0 +1,54 @@
+#############CREANDO CERTIFICADOS DESDE EL INICIO########################
+
+sudo su
+
+cd /usr/share/elasticsearch
+
+		####CERTIFICADOS DE TRANSPORTE####
+./bin/elasticsearch-certutil ca
+nota: dejo el nombre por defecto. pass "<PASSWORD>"
+
+./bin/elasticsearch-certutil cert --ca elastic-stack-ca.p12
+nota: confirmo contrasena de ca y de igual forma nombre por defecto y pass "<PASSWORD>"
+
+copio el elastic-certiful en cada nodo
+
+		# modifico permisos en cada nodo #
+chown elasticsearch:elasticsearch elastic-certificates.p12
+chmod ugo+r elastic-certificates.p12 
+
+		# se debe actializar las pass de los ssl en cada nodo# 
+/usr/share/elasticsearch/bin/elasticsearch-keystore add xpack.security.transport.ssl.keystore.secure_password
+
+/usr/share/elasticsearch/bin/elasticsearch-keystore add xpack.security.transport.ssl.truststore.secure_password
+
+		
+		####CERTIFICADOS HTTP####
+elasticsearch-certutil ca --out http-ca.p12     #Si se desea generar una ca a parte para http
+
+/usr/share/elasticsearch/bin/elasticsearch-certutil http
+#generar los certificados de cada nodo, copiarlos en cada nodo y cambiar los propietarios
+
+#agregar el pass al registro de es en cada nodo
+./bin/elasticsearch-keystore add xpack.security.http.ssl.keystore.secure_password
+
+#copiar el .pem de la carpeta que se genero /kibana y usarlo para kibana y para logstash
+
+https://www.elastic.co/docs/reference/logstash/secure-connection
+https://gemini.google.com/app/896699e026c5e9db?hl=es
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

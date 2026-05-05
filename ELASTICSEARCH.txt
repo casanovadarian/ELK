@@ -1,0 +1,69 @@
+			ELASTICSEARCH
+
+curl -X GET "localhost:9200/_cluster/health?pretty"                 #estado de salud del cluster
+
+curl -k -u elastic:<PASSWORD> -X GET "https://localhost:9200/_cluster/health?pretty"     #####COMANDO EXACTO PARA SALUD CON SEGURIDAD
+curl -k -u elastic:<PASSWORD> -X GET "https://localhost:9200/_cat/nodes?v" 		#####VER TODOS LOS NODOS DEL CLUSTER
+
+sudo tail -50 /var/log/elasticsearch/uclv-elk-cluster.log           #revisar los logs del cluster
+
+
+
+sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -i		#reiniciar la contrasena
+
+######## Generar certificado único para transporte
+sudo /usr/share/elasticsearch/bin/elasticsearch-certutil ca --out elastic-stack-ca.p12 --pass "silent"
+
+sudo /usr/share/elasticsearch/bin/elasticsearch-certutil cert --ca elastic-stack-ca.p12 --ca-pass <contraseña_del_ca> --pass <contraseña_del_certificado> -out elastic-certificates.p12
+
+##########INSTALAR certificados en todos los nodos
+sudo mv transport.p12 /etc/elasticsearch/certs/
+
+sudo chown elasticsearch:elasticsearch /etc/elasticsearch/certs/transport.p12
+sudo chmod 640 /etc/elasticsearch/certs/transport.p12
+
+
+########## Generar certificado para http.ssl 
+sudo /usr/share/elasticsearch/bin/elasticsearch-certutil http --silent
+
+
+########### Crear/actualizar usuario
+bin/elasticsearch-users useradd mi_usuario -p password123 -r superuser
+
+########### Listar usuarios
+bin/elasticsearch-users list
+
+########### Asignar roles
+bin/elasticsearch-users roles mi_usuario -a superuser,monitoring
+
+
+
+#############Adicionar las contrasenas de los certificados 
+sudo /usr/share/elasticsearch/bin/elasticsearch-keystore add xpack.security.transport.ssl.keystore.secure_password
+sudo /usr/share/elasticsearch/bin/elasticsearch-keystore add xpack.security.transport.ssl.truststore.secure_password
+
+
+##############DESINTALAR ELASTICSEARCH
+
+# Detener el servicio
+sudo systemctl stop elasticsearch
+
+# Desinstalar el paquete
+sudo apt remove --purge elasticsearch
+
+# Eliminar directorios de datos y configuración
+sudo rm -rf /var/lib/elasticsearch/
+sudo rm -rf /etc/elasticsearch/
+sudo rm -rf /var/log/elasticsearch/
+sudo rm -rf /usr/share/elasticsearch/
+
+# Eliminar repositorio si lo añadiste
+sudo rm -f /etc/apt/sources.list.d/elastic-*
+sudo apt autoremove
+sudo apt update
+
+KIBANA
+
+#####Generar token para conectarse a ES###########
+sudo /usr/share/elasticsearch/bin/elasticsearch-service-tokens create elastic/kibana kibana-token
+
