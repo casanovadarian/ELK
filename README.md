@@ -75,7 +75,7 @@ Entrada syslog UDP 5514 en es0. Los ficheros se aplican en orden; el primer filt
 | `90-filter.conf` | firewall (filterlog), nginx del portal, sistema, resto | `uclv-firewall`, `uclv-nginx`, `uclv-sistema`, `uclv-otros` |
 | `95-filter-final.conf` | todos | calcula el índice en `@metadata` y elimina campos repetidos |
 
-### Optimización de octubre 2026 (probada, **pendiente de desplegar**)
+### Optimización de octubre 2026 (desplegada el 2026-10-05 14:22)
 
 Análisis previo sobre los datos reales:
 - En HAProxy cada log se guardaba 3 veces: `message`, `event.original` y `_source`.
@@ -116,6 +116,15 @@ Análisis previo sobre los datos reales:
 - En todos los índices se eliminan las copias `message`/`event.original` cuando ya existe `syslog_message`, y los campos `host`, `type`, `@version`, `index_name` e `indice_local`.
 
 **Pruebas**: se ejecutó en es0 una instancia aislada de Logstash (stdin → fichero, sin red ni ES) con 118 mensajes reales de todos los casos. Los 103 eventos resultantes fueron al índice correcto, con todos los campos esperados y sin fallos de parseo. Solo se descartó el ruido previsto.
+
+**Verificación tras el despliegue**:
+- El pipeline arrancó en 22 s, sin errores ni eventos rechazados.
+- En los primeros 2 minutos llegaron eventos a ha-inverso, firewall, dns, nginx, dhcp y captivo, sin fallos de parseo.
+- `uclv-otros` solo recibe ya sshguard y syslogd.
+- Un documento HTTP de HAProxy pasó de ~2 KB a ~0,9 KB.
+
+Copia de la configuración anterior en es0: `/etc/logstash/conf.d.bak-20261005`.
+Para volver atrás: restaurar esa carpeta y `sudo systemctl restart logstash`.
 
 **Despliegue** (en es0):
 
@@ -186,7 +195,6 @@ Los informes y análisis (`Revision/informes/`, `Revision/analisis/`) **no se su
 ## Problemas conocidos (pendientes)
 
 - **Credenciales de Logstash**: pasar el output a un usuario con permisos solo de escritura y guardar su contraseña en el keystore de Logstash.
-- **Se pierden los logs del switch core 10.12.0.254** (~100.000 eventos/semana) hasta que se despliegue la nueva configuración de Logstash (corregido en el repo).
 - Firewall: el ~5 % de los eventos `filterlog` (ICMP, IGMP, IPv6) no se parsean.
 - El pfSense del wifi reinicia `syslogd`/`sshguard` varias veces por hora.
 - Revisar el intervalo de comprobación de los HAProxy contra el puerto 5555 del VPN (5 balanceadores × cada pocos segundos).
