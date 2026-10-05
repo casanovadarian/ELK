@@ -3,8 +3,36 @@
   "priority": 200,
   "template": {
     "settings": {
-      "index.lifecycle.name": "uclv-logs-45d"
+      "index.lifecycle.name": "uclv-logs-45d",
+      "index.codec": "best_compression",
+      "index.mapping.ignore_malformed": true
+    },
+    "mappings": {
+      "properties": {
+        "message":             { "type": "match_only_text" },
+        "syslog_message":      { "type": "match_only_text" },
+        "uclv_mac_address":    { "type": "keyword" },
+        "uclv_accion":         { "type": "keyword" },
+        "dhcp_mac":            { "type": "keyword" },
+        "dhcp_ip":             { "type": "ip" },
+        "dhcp_evento":         { "type": "keyword" },
+        "dhcp_nivel":          { "type": "keyword" },
+        "dhcp_lease_segundos": { "type": "integer" },
+        "dns_cliente_ip":      { "type": "ip" },
+        "dns_consulta":        { "type": "keyword" },
+        "dns_tipo":            { "type": "keyword" },
+        "vpn_cliente_ip":      { "type": "ip" },
+        "vpn_ip_asignada":     { "type": "ip" },
+        "vpn_usuario":         { "type": "keyword" },
+        "vpn_sesion":          { "type": "keyword" },
+        "vpn_conexion":        { "type": "keyword" },
+        "vpn_hub":             { "type": "keyword" },
+        "http_host":           { "type": "keyword" },
+        "user_agent":          { "type": "keyword", "ignore_above": 512 },
+        "haproxy_error":       { "type": "keyword", "ignore_above": 512 },
+        "haproxy_admin":       { "type": "keyword", "ignore_above": 512 }
+      }
     }
   },
-  "_meta": { "description": "Asigna la política ILM uclv-logs-45d a los índices nuevos uclv-*" }
+  "_meta": { "description": "Política ILM, compresión y tipos de los campos para los índices uclv-*" }
 }

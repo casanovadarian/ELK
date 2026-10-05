@@ -17,7 +17,7 @@ Cada nodo de Elasticsearch tiene 302 GB de disco (los datos están en `/mnt/dato
 
 | Ruta | Qué es |
 |---|---|
-| `Logstash/conf.d/` | Pipeline de Logstash (syslog UDP 5514 → índices diarios `uclv-<categoría>-YYYY.MM.dd`) |
+| `Logstash/conf.d/` | Pipeline de Logstash (syslog UDP 5514 → índices diarios `uclv-<categoría>-YYYY.MM.dd`), ver más abajo |
 | `elasticsearch.yml` | Configuración de referencia de un nodo de Elasticsearch |
 | `ILM/` | Política de retención y plantilla de índices |
 | `Revision/` | Revisión semanal automática del cluster |
@@ -52,7 +52,81 @@ curl -k -u elastic -H 'Content-Type: application/json' -X PUT 'https://10.12.1.3
 | 45 días | ~68 % | No: el cluster queda yellow hasta que vuelve el nodo |
 | 50 días | ~74 % | No (máximo absoluto) |
 
-`uclv-ha-inverso` es el ~74 % del volumen. Eliminar los campos duplicados del log de HAProxy (`message`, `syslog_message` y `haproxy_raw_message`) y usar `index.codec: best_compression` permitiría ampliar la retención sin añadir disco.
+`uclv-ha-inverso` es el ~74 % del volumen. La optimización del pipeline de Logstash (ver abajo) debería reducirlo a la mitad aproximadamente, lo que permitiría ampliar la retención sin añadir disco.
+
+La plantilla `uclv-logs` también define, solo para los índices que se creen a partir de su aplicación:
+- `index.codec: best_compression`;
+- `message`/`syslog_message` como `match_only_text`, sin la copia `.keyword`;
+- tipos explícitos para los campos nuevos: `ip` para las IPs y `keyword` para MACs, dominios y usuarios.
+
+## Pipeline de Logstash (`Logstash/conf.d/`)
+
+Entrada syslog UDP 5514 en es0. Los ficheros se aplican en orden; el primer filtro que reconoce un evento le pone el tag `log_procesado` y el índice de destino.
+
+| Fichero | Origen | Índice |
+|---|---|---|
+| `10-filter-syslog-base.conf` | todos | — (parseo de la cabecera syslog y fecha) |
+| `20-filter-sw-core-puerta-254.conf` | switch core 10.12.0.254 | `uclv-core-switch-254` |
+| `30-filter-captivo.conf` | portal cautivo (pfSense wifi.uclv.cu, `logportalauth`) | `uclv-captivo` |
+| `50-filter-haproxy.conf` | HAProxy (10.12.1.5, .9, .72, .73, .74, .80) | `uclv-ha-inverso` |
+| `60-filter-switches.conf` | switches Cisco (`%FAC-n-MNEM`) | `uclv-switches` |
+| `70-filter-vpn.conf` | VPN SoftEther (vpn-uclv) | `uclv-vpn` |
+| `75-filter-wifi-servicios.conf` | DHCP (kea) y DNS (unbound) del pfSense wifi | `uclv-dhcp`, `uclv-dns` |
+| `90-filter.conf` | firewall (filterlog), nginx del portal, sistema, resto | `uclv-firewall`, `uclv-nginx`, `uclv-sistema`, `uclv-otros` |
+| `95-filter-final.conf` | todos | calcula el índice en `@metadata` y elimina campos repetidos |
+
+### Optimización de octubre 2026 (probada, **pendiente de desplegar**)
+
+Análisis previo sobre los datos reales:
+- En HAProxy cada log se guardaba 3 veces: `message`, `event.original` y `_source`.
+- Unos 50.000 eventos/día de HAProxy no se parseaban.
+- Captivo perdía los fallos de login con el usuario vacío.
+- `uclv-otros` era en un 70 % ruido de comprobaciones de salud del VPN.
+
+**HAProxy**
+- El formato se detecta por contenido (HTTP, TCP, error de conexión o mensaje del propio HAProxy), no por el nombre del frontend. Así se parsean los frontends nuevos (`vm-*`, `ftp_front`, `http-8080`…), los `SSL handshake failure` y las peticiones truncadas.
+- `@timestamp` pasa a ser la hora real de la petición.
+- Las cabeceras capturadas se separan en `http_host` y `user_agent`.
+- Si el log se parsea bien, no se guarda el texto original. Ahorro estimado: ~50 % del índice.
+
+**Captivo**
+- Se parsean los `FAILURE` sin usuario y se captura el motivo (`uclv_reason`).
+- Nuevo campo `uclv_accion` para seguir las sesiones: `login`, `login_reutilizado`, `logout`, `fallo` o `error`.
+- Las líneas de validación del formulario (`X invalid: TYPO…`) se guardan como `INPUT INVALIDO` **sin el texto tecleado**, porque puede ser una contraseña escrita en el campo de usuario.
+- Ya no se guarda la copia `unparsed_message`.
+
+**VPN** (nuevo índice `uclv-vpn`)
+- Se descartan las conexiones de los HAProxy al puerto 5555 que no llevan a una sesión.
+- Las líneas `[HUB "VPN"]` (autenticación, sesión, IP asignada, fin de sesión) se conservan siempre, porque los usuarios reales también entran a través de los HAProxy.
+- Campos extraídos: `vpn_usuario`, `vpn_sesion`, `vpn_ip_asignada`, `vpn_cliente_ip` y `vpn_motivo`.
+
+**DHCP** (nuevo índice `uclv-dhcp`)
+- Se descartan los `EVAL_RESULT` (~280.000/día).
+- De cada evento se guardan `dhcp_evento`, `dhcp_mac`, `dhcp_ip` y `dhcp_lease_segundos`, para cruzarlos con captivo (MAC → IP → usuario).
+
+**DNS** (nuevo índice `uclv-dns`)
+- Consultas de los clientes del wifi (~440.000/día), con los campos `dns_cliente_ip`, `dns_consulta` y `dns_tipo`.
+
+**Otras correcciones**
+- **Switch .254**: todos sus eventos se marcan como procesados. Antes, los que no reconocía ningún grok recibían un segundo `index_name` y ES los rechazaba (~100.000 eventos/semana perdidos).
+- `95-filter-final.conf` toma el primer índice si hubiera varios.
+- nginx se evalúa antes que «sistema». Su patrón acepta URLs con `?` y peticiones binarias; antes fallaba el ~25 %.
+- `60-filter-switches.conf` ya no confunde las URLs codificadas de nginx con mensajes Cisco.
+- Se descartan cron y los avisos `snmpd truncating integer`.
+- En todos los índices se eliminan las copias `message`/`event.original` cuando ya existe `syslog_message`, y los campos `host`, `type`, `@version`, `index_name` e `indice_local`.
+
+**Pruebas**: se ejecutó en es0 una instancia aislada de Logstash (stdin → fichero, sin red ni ES) con 118 mensajes reales de todos los casos. Los 103 eventos resultantes fueron al índice correcto, con todos los campos esperados y sin fallos de parseo. Solo se descartó el ruido previsto.
+
+**Despliegue** (en es0):
+
+```bash
+# 1. plantilla (afecta a los índices que se creen a partir de ahora)
+curl -k -u elastic -H 'Content-Type: application/json' -X PUT https://10.12.1.34:9200/_index_template/uclv-logs -d @ILM/uclv-logs.index-template.json
+# 2. configuración (99-output.conf: solo cambia la línea index =>)
+sudo cp Logstash/conf.d/*.conf /etc/logstash/conf.d/
+sudo -u logstash /usr/share/logstash/bin/logstash --path.settings /etc/logstash -t
+sudo systemctl restart logstash   # ~1 min sin recibir syslog UDP
+```
 
 ## Revisión semanal automática
 
@@ -112,6 +186,9 @@ Los informes y análisis (`Revision/informes/`, `Revision/analisis/`) **no se su
 ## Problemas conocidos (pendientes)
 
 - **Credenciales de Logstash**: pasar el output a un usuario con permisos solo de escritura y guardar su contraseña en el keystore de Logstash.
-- **Se pierden los logs del switch core 10.12.0.254** (~100.000 eventos/semana). `20-filter-sw-core-puerta-254.conf` pone `index_name`, y después `60-`/`90-` lo **añaden** otra vez. El índice resultante (`uclv-core-switch-254,uclv-sistema-…`) no es válido y ES lo rechaza con un 400.
+- **Se pierden los logs del switch core 10.12.0.254** (~100.000 eventos/semana) hasta que se despliegue la nueva configuración de Logstash (corregido en el repo).
+- Firewall: el ~5 % de los eventos `filterlog` (ICMP, IGMP, IPv6) no se parsean.
+- El pfSense del wifi reinicia `syslogd`/`sshguard` varias veces por hora.
+- Revisar el intervalo de comprobación de los HAProxy contra el puerto 5555 del VPN (5 balanceadores × cada pocos segundos).
 - `cluster.initial_master_nodes` sigue configurado en los 3 nodos; hay que quitarlo una vez formado el cluster.
 - Pasar de índices diarios a data streams.
