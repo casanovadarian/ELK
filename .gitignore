@@ -1,0 +1,6 @@
+# Informes y análisis semanales generados por la revisión automática:
+# contienen el estado interno del cluster y no deben publicarse.
+Revision/informes/
+Revision/analisis/
+__pycache__/
+*.swp

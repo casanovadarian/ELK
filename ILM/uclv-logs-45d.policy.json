@@ -1,0 +1,19 @@
+{
+  "policy": {
+    "_meta": { "description": "Retención de 45 días para los índices diarios uclv-* de Logstash" },
+    "phases": {
+      "hot": {
+        "min_age": "0ms",
+        "actions": { "set_priority": { "priority": 100 } }
+      },
+      "warm": {
+        "min_age": "7d",
+        "actions": { "set_priority": { "priority": 50 } }
+      },
+      "delete": {
+        "min_age": "45d",
+        "actions": { "delete": {} }
+      }
+    }
+  }
+}

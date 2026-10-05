@@ -1,0 +1,10 @@
+{
+  "index_patterns": ["uclv-*"],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index.lifecycle.name": "uclv-logs-45d"
+    }
+  },
+  "_meta": { "description": "Asigna la política ILM uclv-logs-45d a los índices nuevos uclv-*" }
+}

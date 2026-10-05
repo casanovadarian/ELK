@@ -1,0 +1,6 @@
+{
+  "cluster": ["monitor", "read_ilm"],
+  "indices": [
+    { "names": ["*"], "privileges": ["monitor", "view_index_metadata"], "allow_restricted_indices": false }
+  ]
+}

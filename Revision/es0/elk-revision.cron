@@ -1,0 +1,5 @@
+# Revisión semanal del cluster ELK (/usr/local/sbin/elk-revision).
+# Se lanza a diario y al arrancar, pero solo genera informe si han pasado 7 días
+# desde el anterior: si es0 estuvo apagado el día previsto, sale al siguiente.
+30 7 * * * root /usr/local/sbin/elk-revision >> /var/log/elk-revision/cron.log 2>&1
+@reboot    root sleep 600 && /usr/local/sbin/elk-revision >> /var/log/elk-revision/cron.log 2>&1

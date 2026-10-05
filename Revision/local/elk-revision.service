@@ -1,0 +1,8 @@
+[Unit]
+Description=Análisis semanal del cluster ELK (descarga informes de es0 y los analiza con Claude)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/Universidad/Devops/Elastic/Revision/local/elk-revision-local.sh
+TimeoutStartSec=20min

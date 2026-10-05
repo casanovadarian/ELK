@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Revisión semanal del cluster uclv-elk-cluster (se ejecuta en es0).
+
+Cron lo lanza a diario; solo genera informe si el último tiene >= INTERVALO_DIAS
+(así, si es0 estuvo apagado el día previsto, el informe sale al día siguiente).
+Uso: elk-revision [--force]
+"""
+import configparser
+import datetime as dt
+import glob
+import gzip
+import json
+import os
+import re
+import ssl
+import subprocess
+import sys
+import urllib.request
+from base64 import b64encode
+from collections import Counter, defaultdict
+
+CONFIG = "/etc/elk-revision/config.ini"
+STATE = "/var/lib/elk-revision/ultima_ejecucion"
+OUT_DIR = "/var/log/elk-revision"
+INTERVALO_DIAS = 7
+CONSERVAR_INFORMES_DIAS = 365
+
+# Umbrales
+DISCO_AVISO, DISCO_CRITICO = 75, 85  # watermark low de ES = 85 %
+HEAP_AVISO = 85
+SHARDS_NODO_AVISO = 800  # límite por defecto: 1000 por nodo
+RETENCION_DIAS = 45      # política ILM uclv-logs-45d
+
+NIVELES = {"OK": 0, "AVISO": 1, "CRITICO": 2}
+
+
+class Revision:
+    def __init__(self, cfg):
+        self.urls = [u.strip() for u in cfg["es"]["urls"].split(",")]
+        self.auth = "Basic " + b64encode(f'{cfg["es"]["user"]}:{cfg["es"]["password"]}'.encode()).decode()
+        self.ctx = ssl.create_default_context(cafile=cfg["es"]["ca"])
+        self.ctx.check_hostname = False  # los certificados HTTP se emitieron por IP/nombre de nodo
+        self.hallazgos = []  # (nivel, texto)
+        self.lineas = []
+
+    # ---------- utilidades ----------
+    def get(self, path):
+        ultimo_error = None
+        for url in self.urls:  # si un nodo no responde, se prueba el siguiente
+            req = urllib.request.Request(f"{url}/{path}", headers={"Authorization": self.auth})
+            try:
+                with urllib.request.urlopen(req, context=self.ctx, timeout=30) as r:
+                    return json.load(r)
+            except Exception as e:  # noqa: BLE001
+                ultimo_error = e
+        raise RuntimeError(f"Ningún nodo respondió a {path}: {ultimo_error}")
+
+    def marcar(self, nivel, texto):
+        self.hallazgos.append((nivel, texto))
+
+    def p(self, texto=""):
+        self.lineas.append(texto)
+
+    def seccion(self, titulo):
+        self.p()
+        self.p(f"== {titulo} ".ljust(78, "="))
+
+    # ---------- comprobaciones ----------
+    def cluster(self):
+        self.seccion("Cluster")
+        h = self.get("_cluster/health")
+        self.p(f"Estado: {h['status']}  nodos: {h['number_of_nodes']}  datos: {h['number_of_data_nodes']}")
+        self.p(f"Shards activos: {h['active_shards']} (primarios {h['active_primary_shards']})  "
+               f"sin asignar: {h['unassigned_shards']}  reubicando: {h['relocating_shards']}  "
+               f"tareas pendientes: {h['number_of_pending_tasks']}")
+        if h["status"] == "red":
+            self.marcar("CRITICO", "Cluster en estado RED (hay shards primarios sin asignar)")
+        elif h["status"] == "yellow":
+            self.marcar("AVISO", "Cluster en estado YELLOW (réplicas sin asignar)")
+        if h["number_of_nodes"] < 3:
+            self.marcar("CRITICO", f"Solo {h['number_of_nodes']} de 3 nodos en el cluster")
+        if h["unassigned_shards"]:
+            try:
+                ex = self.get("_cluster/allocation/explain")
+                self.p(f"Motivo (primer shard sin asignar): {ex.get('index')}[{ex.get('shard')}] "
+                       f"{ex.get('unassigned_info', {}).get('reason')} - {ex.get('allocate_explanation', '')}")
+            except Exception as e:  # noqa: BLE001
+                self.p(f"No se pudo obtener allocation/explain: {e}")
+
+    def nodos(self):
+        self.seccion("Nodos")
+        nodes = self.get("_cat/nodes?format=json&bytes=gb&h=name,version,node.role,master,"
+                         "heap.percent,ram.percent,cpu,load_1m,uptime")
+        alloc = {a["node"]: a for a in self.get("_cat/allocation?format=json&bytes=gb") if a.get("node")}
+        self.p(f"{'nodo':<12}{'ver':<8}{'rol':<5}{'m':<3}{'heap%':>6}{'ram%':>6}{'load1':>7}"
+               f"{'shards':>8}{'disco%':>8}{'usado':>8}{'libre':>8}  uptime")
+        self.max_disco = (None, 0, 0, 0)  # nodo, %, usado, total
+        for n in sorted(nodes, key=lambda x: x["name"]):
+            a = alloc.get(n["name"], {})
+            disco = int(a.get("disk.percent") or 0)
+            shards = int(a.get("shards") or 0)
+            self.p(f"{n['name']:<12}{n['version']:<8}{n['node.role']:<5}{n['master']:<3}{n['heap.percent']:>6}"
+                   f"{n['ram.percent']:>6}{n['load_1m']:>7}{shards:>8}{disco:>8}{a.get('disk.used', '?'):>8}"
+                   f"{a.get('disk.avail', '?'):>8}  {n['uptime']}")
+            if disco >= DISCO_CRITICO:
+                self.marcar("CRITICO", f"Disco de {n['name']} al {disco}% (watermark low 85%)")
+            elif disco >= DISCO_AVISO:
+                self.marcar("AVISO", f"Disco de {n['name']} al {disco}%")
+            if int(n["heap.percent"]) >= HEAP_AVISO:
+                self.marcar("AVISO", f"Heap de {n['name']} al {n['heap.percent']}%")
+            if shards >= SHARDS_NODO_AVISO:
+                self.marcar("AVISO", f"{n['name']} tiene {shards} shards (límite 1000/nodo)")
+            if disco > self.max_disco[1]:
+                self.max_disco = (n["name"], disco, float(a.get("disk.used") or 0), float(a.get("disk.total") or 0))
+
+    def indices(self):
+        self.seccion("Ingesta (índices uclv-*, primario + réplica)")
+        idx = self.get("_cat/indices/uclv-*?format=json&bytes=mb&h=index,store.size,docs.count")
+        por_dia = defaultdict(float)
+        por_cat = defaultdict(lambda: defaultdict(float))
+        for i in idx:
+            m = re.match(r"(.+)-(\d{4}\.\d\d\.\d\d)$", i["index"])
+            if not m:
+                continue
+            gb = float(i["store.size"] or 0) / 1024
+            por_dia[m.group(2)] += gb
+            por_cat[m.group(1)][m.group(2)] += gb
+        hoy = dt.date.today().strftime("%Y.%m.%d")
+        dias = sorted(d for d in por_dia if d < hoy)  # hoy está incompleto
+        ult7 = dias[-7:]
+        if not ult7:
+            self.marcar("AVISO", "No hay índices uclv-* de días completos")
+            return
+        media7 = sum(por_dia[d] for d in ult7) / len(ult7)
+        self.p(f"Índices uclv-*: {len(idx)}   más antiguo: {dias[0] if dias else '-'}   total: "
+               f"{sum(por_dia.values()):.1f} GB")
+        self.p(f"Media últimos {len(ult7)} días: {media7:.1f} GB/día")
+        self.p()
+        self.p(f"{'categoría':<24}{'GB/día (7d)':>12}{'último día':>12}")
+        for cat in sorted(por_cat, key=lambda c: -sum(por_cat[c][d] for d in ult7)):
+            m7 = sum(por_cat[cat][d] for d in ult7) / len(ult7)
+            ultimo = por_cat[cat].get(ult7[-1], 0.0)
+            self.p(f"{cat:<24}{m7:>12.2f}{ultimo:>12.2f}")
+            if ultimo == 0 and m7 > 0.01:
+                self.marcar("AVISO", f"{cat}: sin datos el {ult7[-1]} (¿dejó de llegar el origen?)")
+
+        # Días que se tardaría en llegar al 85 % en el nodo más lleno (crecimiento repartido en 3 nodos)
+        nodo, pct, usado, total = self.max_disco
+        if total:
+            margen = total * 0.85 - usado
+            self.p()
+            self.p(f"Nodo más lleno: {nodo} ({pct}%). Espacio hasta el 85%: {margen:.0f} GB")
+            self.p(f"Volumen en {RETENCION_DIAS} días al ritmo actual: {media7 * RETENCION_DIAS:.0f} GB "
+                   f"(capacidad total aprox. {total * 3:.0f} GB)")
+
+        antiguos = [d for d in dias
+                    if (dt.date.today() - dt.datetime.strptime(d, "%Y.%m.%d").date()).days > RETENCION_DIAS + 2]
+        if antiguos:
+            self.marcar("AVISO", f"Hay índices de más de {RETENCION_DIAS} días ({antiguos[0]}...): ILM no está borrando")
+
+    def ilm(self):
+        self.seccion("ILM")
+        st = self.get("_ilm/status")
+        self.p(f"Modo ILM: {st['operation_mode']}")
+        if st["operation_mode"] != "RUNNING":
+            self.marcar("CRITICO", f"ILM no está en marcha ({st['operation_mode']})")
+        ex = self.get("uclv-*/_ilm/explain?filter_path=indices.*.managed,indices.*.policy,"
+                      "indices.*.phase,indices.*.step,indices.*.step_info")["indices"]
+        fases = Counter(v.get("phase", "sin gestionar") for v in ex.values())
+        self.p("Índices por fase: " + ", ".join(f"{k}={v}" for k, v in sorted(fases.items())))
+        sin_politica = [k for k, v in ex.items() if not v.get("managed")]
+        errores = {k: v for k, v in ex.items() if v.get("step") == "ERROR"}
+        if sin_politica:
+            self.marcar("AVISO", f"{len(sin_politica)} índices uclv-* sin política ILM (ej. {sin_politica[0]})")
+        if errores:
+            k, v = next(iter(errores.items()))
+            self.marcar("CRITICO", f"{len(errores)} índices con ILM en ERROR (ej. {k}: "
+                        f"{json.dumps(v.get('step_info', {}))[:200]})")
+
+    def logstash(self, desde):
+        self.seccion("Logstash (es0)")
+        activo = servicio("logstash")
+        self.p(f"Servicio: {activo}")
+        if activo != "active":
+            self.marcar("CRITICO", f"Logstash no está activo ({activo})")
+        patron = re.compile(r"^\[(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)[^\]]*\]\[(ERROR|WARN)\s*\]\[([^\]]+)\]")
+        indices_rechazados = Counter()
+        tipos = Counter()
+        desde_txt = desde.strftime("%Y-%m-%dT%H:%M:%S")
+        for f in glob.glob("/var/log/logstash/logstash-plain*.log*"):
+            if dt.datetime.fromtimestamp(os.path.getmtime(f)) < desde:
+                continue
+            abrir = gzip.open if f.endswith(".gz") else open
+            with abrir(f, "rt", errors="replace") as fh:
+                for linea in fh:
+                    m = patron.match(linea)
+                    if not m or m.group(1) < desde_txt:
+                        continue
+                    tipos[(m.group(2), m.group(3))] += 1
+                    r = re.search(r'_index: "([^"]+)"', linea)
+                    if "Could not index event" in linea and r:
+                        indices_rechazados[re.sub(r"-\d{4}\.\d\d\.\d\d$", "-*", r.group(1))] += 1
+        total_err = sum(v for (lvl, _), v in tipos.items() if lvl == "ERROR")
+        self.p(f"Desde {desde:%Y-%m-%d %H:%M}: {total_err} ERROR, "
+               f"{sum(v for (lvl, _), v in tipos.items() if lvl == 'WARN')} WARN")
+        for (lvl, comp), n in tipos.most_common(6):
+            self.p(f"  {n:>8}  {lvl:<5} {comp}")
+        if indices_rechazados:
+            self.p("Eventos rechazados por Elasticsearch (por índice destino):")
+            for i, n in indices_rechazados.most_common(8):
+                self.p(f"  {n:>8}  {i}")
+            self.marcar("AVISO", f"Logstash: {sum(indices_rechazados.values())} eventos rechazados por ES "
+                        f"(se están perdiendo logs)")
+        elif total_err:
+            self.marcar("AVISO", f"Logstash: {total_err} errores desde la última revisión")
+
+    def kibana(self):
+        self.seccion("Kibana (es0)")
+        activo = servicio("kibana")
+        estado = "?"
+        try:
+            with urllib.request.urlopen("http://localhost:5601/api/status", timeout=20) as r:
+                estado = json.load(r).get("status", {}).get("overall", {}).get("level", "?")
+        except Exception as e:  # noqa: BLE001
+            estado = f"sin respuesta ({e.__class__.__name__})"
+        self.p(f"Servicio: {activo}   estado API: {estado}")
+        if activo != "active":
+            self.marcar("CRITICO", f"Kibana no está activo ({activo})")
+        elif estado not in ("available", "?"):
+            self.marcar("AVISO", f"Kibana estado: {estado}")
+
+    def es0(self):
+        self.seccion("Sistema es0")
+        st = os.statvfs("/")
+        pct = 100 - st.f_bavail * 100 // st.f_blocks
+        libre = st.f_bavail * st.f_frsize / 1024 ** 3
+        logs = subprocess.run(["du", "-sm", "/var/log"], capture_output=True, text=True).stdout.split()[0]
+        self.p(f"Disco /: {pct}% usado, {libre:.1f} GB libres   /var/log: {int(logs) / 1024:.1f} GB")
+        if pct >= 85:
+            self.marcar("CRITICO", f"Disco de es0 al {pct}%")
+        elif pct >= 75:
+            self.marcar("AVISO", f"Disco de es0 al {pct}%")
+
+    # ---------- informe ----------
+    def ejecutar(self, desde):
+        for paso in (self.cluster, self.nodos, self.indices, self.ilm,
+                     lambda: self.logstash(desde), self.kibana, self.es0):
+            try:
+                paso()
+            except Exception as e:  # noqa: BLE001
+                self.marcar("CRITICO", f"Fallo al revisar ({getattr(paso, '__name__', 'paso')}): {e}")
+        nivel = max((n for n, _ in self.hallazgos), key=NIVELES.get, default="OK")
+        cab = [
+            f"REVISIÓN SEMANAL uclv-elk-cluster - {dt.datetime.now():%Y-%m-%d %H:%M}",
+            f"Periodo: {desde:%Y-%m-%d %H:%M} -> ahora",
+            f"ESTADO GLOBAL: {nivel}",
+        ]
+        if self.hallazgos:
+            cab.append("Hallazgos:")
+            cab += [f"  [{n}] {t}" for n, t in sorted(self.hallazgos, key=lambda x: -NIVELES[x[0]])]
+        else:
+            cab.append("Sin hallazgos.")
+        return nivel, "\n".join(cab + self.lineas) + "\n"
+
+
+def servicio(nombre):
+    return subprocess.run(["systemctl", "is-active", nombre], capture_output=True, text=True).stdout.strip()
+
+
+def main():
+    force = "--force" in sys.argv
+    ahora = dt.datetime.now()
+    ultima = None
+    if os.path.exists(STATE):
+        ultima = dt.datetime.fromtimestamp(float(open(STATE).read().strip()))
+    if not force and ultima and ahora - ultima < dt.timedelta(days=INTERVALO_DIAS, hours=-2):
+        return 0  # aún no toca (2 h de margen para que el cron diario no se salte un día)
+
+    cfg = configparser.ConfigParser()
+    cfg.read(CONFIG)
+    desde = ultima or ahora - dt.timedelta(days=INTERVALO_DIAS)
+    nivel, texto = Revision(cfg).ejecutar(desde)
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    destino = os.path.join(OUT_DIR, f"revision-{ahora:%Y-%m-%d}.txt")
+    with open(destino, "w") as f:
+        f.write(texto)
+    os.chmod(destino, 0o640)
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE, "w") as f:
+        f.write(str(ahora.timestamp()))
+
+    limite = ahora - dt.timedelta(days=CONSERVAR_INFORMES_DIAS)
+    for viejo in glob.glob(os.path.join(OUT_DIR, "revision-*.txt")):
+        if dt.datetime.fromtimestamp(os.path.getmtime(viejo)) < limite:
+            os.remove(viejo)
+    print(f"{nivel}: {destino}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

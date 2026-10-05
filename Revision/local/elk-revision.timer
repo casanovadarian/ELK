@@ -1,0 +1,12 @@
+[Unit]
+Description=Comprueba cada hora si toca el análisis semanal del cluster ELK
+
+[Timer]
+OnBootSec=5min
+OnCalendar=hourly
+# Si el portátil estaba apagado o suspendido, se ejecuta al volver
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
