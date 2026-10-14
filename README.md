@@ -177,10 +177,11 @@ sudo elk-revision --force   # generar uno ahora
 - Si toca análisis, descarga de es0 **todos** los informes pendientes y se los pasa a `claude -p` junto con el análisis anterior, para comparar tendencias.
 - El análisis se guarda en `Revision/analisis/analisis-YYYY-MM-DD.md` y avisa con una notificación de escritorio.
 - Si es0 tiene informes pero el último tiene más de 8 días, fuerza uno nuevo y avisa de que el cron de es0 falla.
-- **VPN**: si es0 no responde, pregunta con una notificación si se activa la VPN UCLV (`~/SoftEther/connect_normal.sh`):
-  - Si no se contesta en 15 minutos, cuenta como «no», y no vuelve a preguntar hasta pasadas 4 horas.
+- **VPN**: si es0 no responde, pregunta con una notificación con botones (**Conectar VPN** / **Ahora no**) si se activa la VPN UCLV (`~/SoftEther/connect_normal.sh`):
+  - Si no se contesta en 15 minutos, cuenta como «no»: la notificación se retira sola y no vuelve a preguntar hasta pasadas 4 horas.
   - Si se acepta, siempre desconecta al terminar (`disconnect.sh`).
   - No conecta si hay más de una ruta por defecto, porque `connect_normal.sh` las rompería.
+  - La pregunta la hace `preguntar.py` (Python con `gi`, sin dependencias extra), no `notify-send`. En Ubuntu, el perfil de AppArmor de `notify-send` (`/etc/apparmor.d/notify-send`) le impide consultar si GNOME admite botones (`GetCapabilities`) y recibir el clic (`ActionInvoked`). Por eso, con `notify-send -A` la pregunta salía sin botones y siempre acababa en «no».
 
 Instalación:
 
