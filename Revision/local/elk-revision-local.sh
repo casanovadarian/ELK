@@ -52,7 +52,8 @@ pedir_vpn() {
     avisar "Revisión ELK pendiente" "es0 no accesible y hay varias rutas por defecto: no se activa la VPN automáticamente (connect_normal.sh rompería las rutas)."
     return 1
   fi
-  respuesta=$(timeout 900 notify-send -a "Revisión ELK" -u critical -t 0 \
+  # notify-send no sirve: AppArmor (Ubuntu) le impide mostrar botones y recibir la respuesta.
+  respuesta=$(python3 "$REPO/local/preguntar.py" --app "Revisión ELK" --timeout 900 \
     -A conectar="Conectar VPN" -A no="Ahora no" \
     "Revisión ELK pendiente" "es0 no es accesible. ¿Activo la VPN UCLV para descargar el informe y la desconecto al terminar?" 2>/dev/null || true)
   [[ "$respuesta" == "conectar" ]]
