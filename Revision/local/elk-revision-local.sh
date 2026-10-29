@@ -49,7 +49,7 @@ pedir_vpn() {
   fi
   touch "$PREGUNTA_VPN"
   if (( $(ip route show default | wc -l) != 1 )); then
-    avisar "Revisión ELK pendiente" "es0 no accesible y hay varias rutas por defecto: no se activa la VPN automáticamente (connect_normal.sh rompería las rutas)."
+    avisar "Revisión ELK pendiente" "es0 no accesible y hay varias rutas por defecto: no se activa la VPN automáticamente (uclv.sh dejaría rutas en conflicto)."
     return 1
   fi
   # notify-send no sirve: AppArmor (Ubuntu) le impide mostrar botones y recibir la respuesta.
@@ -66,7 +66,7 @@ if ! listado=$(listar); then
   fi
   log "Conectando VPN (aceptado por el usuario)"
   trap desconectar_vpn EXIT
-  (cd "$VPN_DIR" && ./connect_normal.sh) >/dev/null 2>&1 || true
+  (cd "$VPN_DIR" && ./uclv.sh) >/dev/null 2>&1 || true
   if ! listado=$(listar); then
     log "es0 sigue sin responder con la VPN"
     avisar "Revisión ELK" "Ni con la VPN se llega a es0; se reintentará más tarde."
