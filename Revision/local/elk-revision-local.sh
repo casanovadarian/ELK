@@ -66,7 +66,11 @@ if ! listado=$(listar); then
   fi
   log "Conectando VPN (aceptado por el usuario)"
   trap desconectar_vpn EXIT
-  (cd "$VPN_DIR" && ./uclv.sh) >/dev/null 2>&1 || true
+  if ! salida_vpn=$(cd "$VPN_DIR" && ./uclv.sh 2>&1); then
+    log "Falló uclv.sh: $(tail -3 <<<"$salida_vpn" | tr '\n' ' ')"
+    avisar "Revisión ELK" "No se pudo conectar la VPN UCLV (uclv.sh). Mira: journalctl --user -u elk-revision"
+    exit 0
+  fi
   if ! listado=$(listar); then
     log "es0 sigue sin responder con la VPN"
     avisar "Revisión ELK" "Ni con la VPN se llega a es0; se reintentará más tarde."
